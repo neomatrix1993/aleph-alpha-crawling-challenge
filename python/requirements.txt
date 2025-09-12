@@ -3,3 +3,7 @@ pika
 prometheus-client
 requests
 warcio
+boto3
+pandas
+pyarrow
+transformers
