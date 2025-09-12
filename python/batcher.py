@@ -18,6 +18,10 @@ from rabbitmq import QUEUE_NAME, MessageQueueChannel, RabbitMQChannel
 BATCH_SIZE = 50
 
 batch_counter = Counter("batcher_batches", "Number of published batches")
+urls_total = Counter("batcher_urls_total", "Total URLs processed from index files")
+urls_filtered_language = Counter("batcher_urls_filtered_language", "URLs filtered out (non-English)")
+urls_filtered_status = Counter("batcher_urls_filtered_status", "URLs filtered out (non-200 status)")
+urls_kept = Counter("batcher_urls_kept", "URLs that passed all filters")
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,20 +59,29 @@ def process_index(
         for line in data.split("\n"):
             if line == "":
                 continue
+            urls_total.inc()
             values = line.split(" ")
             metadata = json.loads("".join(values[2:]))
-            if (
-                "languages" in metadata
-                and "eng" in metadata["languages"]
-                and metadata["status"] == "200"
-            ):
-                found_urls.append(
-                    {
-                        "surt_url": values[0],
-                        "timestamp": values[1],
-                        "metadata": metadata,
-                    }
-                )
+            
+            # Check language filter
+            if not ("languages" in metadata and "eng" in metadata["languages"]):
+                urls_filtered_language.inc()
+                continue
+                
+            # Check status filter
+            if metadata["status"] != "200":
+                urls_filtered_status.inc()
+                continue
+                
+            # URL passed all filters
+            urls_kept.inc()
+            found_urls.append(
+                {
+                    "surt_url": values[0],
+                    "timestamp": values[1],
+                    "metadata": metadata,
+                }
+            )
             if len(found_urls) >= batch_size:
                 publish_batch(channel, found_urls)
                 found_urls = []
