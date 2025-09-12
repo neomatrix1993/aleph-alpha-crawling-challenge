@@ -10,6 +10,11 @@ from rabbitmq import QUEUE_NAME, rabbitmq_channel
 
 
 batch_counter = Counter("worker_batches", "Number of consumed batches")
+warc_files_downloaded = Counter("worker_warc_files_downloaded", "Number of WARC files downloaded")
+warc_records_total = Counter("worker_warc_records_total", "Total WARC records processed")
+warc_records_response = Counter("worker_warc_records_response", "WARC records that are HTTP responses")
+text_extractions_attempted = Counter("worker_text_extractions_attempted", "Text extractions attempted")
+text_extractions_successful = Counter("worker_text_extractions_successful", "Text extractions that produced non-empty text")
 
 
 def process_batch(downloader: Downloader, ch, method, _properties, body):
@@ -21,9 +26,16 @@ def process_batch(downloader: Downloader, ch, method, _properties, body):
             int(item["metadata"]["offset"]),
             int(item["metadata"]["length"]),
         )
+        warc_files_downloaded.inc()
+        
         for record in WARCIterator(io.BytesIO(data)):
+            warc_records_total.inc()
             if record.rec_type == "response":
+                warc_records_response.inc()
+                text_extractions_attempted.inc()
                 _text = trafilatura.extract(record.content_stream().read())
+                if _text and _text.strip():
+                    text_extractions_successful.inc()
                 # TODO: process text
     batch_counter.inc()
     ch.basic_ack(delivery_tag=method.delivery_tag)
