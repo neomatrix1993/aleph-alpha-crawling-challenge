@@ -182,7 +182,7 @@ def process_batch(downloader: Downloader, ch, method, _properties, body):
                                 if _text and _text.strip():
                                     # Apply document length filter (500-1,000,000 characters)
                                     text_length = len(_text)
-                                    if text_length < 100 or text_length > 1_000_000:
+                                    if text_length < 500 or text_length > 1_000_000:
                                         documents_filtered_length.inc()
                                         continue
                                     
