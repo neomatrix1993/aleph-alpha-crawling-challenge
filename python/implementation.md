@@ -67,7 +67,9 @@
 - Process can resume exactly where it left off after failures
 - Organized code into separate modules: checkpoint.py, health_checker.py, robust_publisher.py
 
-## Pending Tasks
-
-### 10. Batcher Monitoring
-- Track cluster.idx processing percentage and batch counts
+### 10. Batcher Monitoring ✅
+- Added exact line counting from cluster.idx file (reads last column for total: 1,021,496 lines)
+- Added processing progress percentage calculation with Prometheus gauge
+- Added real-time batch count tracking with `batches_published_total` metric
+- Progress monitoring shows current position and completion percentage
+- Metrics exposed: `batcher_progress_percent`, `batcher_total_index_lines`, `batches_published_total`

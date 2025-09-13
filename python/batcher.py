@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 import json
 import argparse
 from typing import Any, Mapping, Sequence
-from prometheus_client import Counter, start_http_server
+from prometheus_client import Counter, Gauge, start_http_server
 
 from commoncrawl import (
     BASE_URL,
@@ -24,6 +24,39 @@ urls_total = Counter("batcher_urls_total", "Total URLs processed from index file
 urls_filtered_language = Counter("batcher_urls_filtered_language", "URLs filtered out (non-English)")
 urls_filtered_status = Counter("batcher_urls_filtered_status", "URLs filtered out (non-200 status)")
 urls_kept = Counter("batcher_urls_kept", "URLs that passed all filters")
+
+# Progress monitoring metrics
+processing_progress_percent = Gauge("batcher_progress_percent", "Percentage of cluster.idx file processed")
+total_index_lines = Gauge("batcher_total_index_lines", "Total estimated lines in cluster.idx")
+batches_published_total = Gauge("batcher_batches_published_total", "Total batches published so far")
+
+
+def get_total_lines_from_index(filename: str) -> int:
+    """Get exact total lines by reading the last line number from cluster.idx"""
+    try:
+        with open(filename, 'rb') as f:
+            # Seek to end and read backwards to find last line
+            f.seek(-1000, 2)  # Go to near end of file
+            lines = f.read().decode('utf-8').split('\n')
+            
+            # Find the last non-empty line
+            for line in reversed(lines):
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 5:  # Ensure we have enough columns
+                        try:
+                            total_lines = int(parts[-1])  # Last column has line number
+                            print(f"Found {total_lines:,} total lines in cluster.idx")
+                            return total_lines
+                        except ValueError:
+                            continue
+            
+        print("Could not parse line numbers from cluster.idx")
+        return 0
+        
+    except Exception as e:
+        print(f"Could not read cluster.idx file: {e}")
+        return 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +135,7 @@ def process_index_with_recovery(
     downloader: Downloader,
     batch_size: int,
     resume_from_line: int = 0,
+    total_lines: int = 0,
 ) -> bool:
     """Process index with robust publishing and resume capability."""
     print(f"Starting processing from line {resume_from_line}, batch size {batch_size}")
@@ -170,6 +204,12 @@ def process_index_with_recovery(
                         if result is True:
                             found_urls = []
                             batch_count += 1
+                            batches_published_total.set(batch_count)
+                            
+                            # Update progress percentage
+                            if total_lines > 0:
+                                progress = (current_line / total_lines) * 100
+                                processing_progress_percent.set(progress)
                             break
                         elif result is False:
                             print(f"Retrying batch {batch_count + 1} publish")
@@ -187,6 +227,7 @@ def process_index_with_recovery(
                 )
                 if result is True:
                     batch_count += 1
+                    batches_published_total.set(batch_count)
                     break
                 elif result is False:
                     print("Retrying final batch publish")
@@ -214,10 +255,21 @@ def main() -> None:
     start_http_server(9000)
     print("Prometheus metrics server started on port 9000")
     
+    # Get total lines from cluster.idx
+    total_lines = get_total_lines_from_index(args.cluster_idx_filename)
+    total_index_lines.set(total_lines)
+    
     # Setup checkpoint and recovery system
     checkpoint = ProcessingCheckpoint()
     progress = checkpoint.load_progress()
     print(f"Loaded checkpoint: {progress['total_batches_sent']} batches sent, line {progress['last_processed_line']}")
+    
+    # Set initial progress metrics
+    batches_published_total.set(progress['total_batches_sent'])
+    if total_lines > 0:
+        initial_progress = (progress['last_processed_line'] / total_lines) * 100
+        processing_progress_percent.set(initial_progress)
+        print(f"Progress: {initial_progress:.1f}% complete")
     
     # Channel factory for robust publisher
     def create_channel():
@@ -238,7 +290,8 @@ def main() -> None:
     try:
         success = process_index_with_recovery(
             index_reader, publisher, downloader, BATCH_SIZE,
-            resume_from_line=progress["last_processed_line"]
+            resume_from_line=progress["last_processed_line"],
+            total_lines=total_lines
         )
         
         if success:
