@@ -5,11 +5,10 @@ import time
 import pandas as pd
 import boto3
 from botocore.client import Config
-from prometheus_client import start_http_server
+from prometheus_client import start_http_server, Gauge, Counter
 import trafilatura
 from transformers import AutoTokenizer
 from warcio.archiveiterator import WARCIterator
-from prometheus_client import Counter
 
 from commoncrawl import BASE_URL, CCDownloader, Downloader
 from rabbitmq import QUEUE_NAME, rabbitmq_channel
@@ -27,6 +26,16 @@ items_skipped = Counter("worker_items_skipped", "Items skipped due to errors")
 documents_processed = Counter("worker_documents_processed", "Documents successfully processed and tokenized")
 documents_uploaded = Counter("worker_documents_uploaded", "Documents uploaded to object store")
 tokenization_errors = Counter("worker_tokenization_errors", "Tokenization failures")
+
+# Data volume and processing metrics
+bytes_downloaded = Counter("worker_bytes_downloaded", "Total bytes downloaded from WARC files")
+batch_processing_time = Gauge("worker_batch_processing_seconds", "Time taken to process each batch")
+batch_size_items = Gauge("worker_batch_size_items", "Number of items in current batch")
+document_batch_size = Gauge("worker_document_batch_size", "Number of documents in current upload batch")
+document_batch_size_bytes = Gauge("worker_document_batch_size_bytes", "Size of current document batch in bytes")
+documents_filtered_length = Counter("worker_documents_filtered_length", "Documents filtered out by length constraints")
+upload_attempts = Counter("worker_upload_attempts", "Number of upload attempts")
+upload_failures = Counter("worker_upload_failures", "Number of upload failures")
 
 
 class DocumentBatch:
@@ -60,15 +69,27 @@ class DocumentBatch:
 
 # Global tokenizer and document batch
 tokenizer = None
-document_batch = DocumentBatch(max_docs=10000, max_size_mb=256, max_time_minutes=30)  # Production batch size
+document_batch = DocumentBatch(max_docs=10, max_size_mb=1, max_time_minutes=1)  # Production batch size
 s3_client = None
+s3_bucket_name = 'processed-docs'
 
 
-def upload_documents_to_minio(documents, bucket_name='processed-docs'):
+def upload_documents_to_minio(documents, bucket_name=None):
     """Upload documents to MinIO as Parquet file"""
-    global s3_client
+    global s3_client, s3_bucket_name
     if not s3_client:
+        print("❌ Upload skipped: S3 client not initialized")
         return
+    
+    if not documents:
+        print("❌ Upload skipped: No documents to upload")
+        return
+    
+    if bucket_name is None:
+        bucket_name = s3_bucket_name
+    
+    print(f"🔄 Uploading {len(documents)} documents to {bucket_name}...")
+    upload_attempts.inc()
     
     try:
         # Create DataFrame
@@ -95,6 +116,7 @@ def upload_documents_to_minio(documents, bucket_name='processed-docs'):
         print(f"✅ Uploaded {len(documents)} documents to {filename}")
         
     except Exception as e:
+        upload_failures.inc()
         print(f"❌ Upload failed: {e}")
 
 
@@ -129,10 +151,12 @@ def process_and_tokenize_text(text, url, timestamp, filename):
 def process_batch(downloader: Downloader, ch, method, _properties, body):
     print("Received batch of size", len(body))
     batch_failed = False
+    batch_start_time = time.time()
     
     try:
         batch = json.loads(body)
         print(f"Processing batch with {len(batch)} items")
+        batch_size_items.set(len(batch))
         
         for item in batch:
             try:
@@ -143,6 +167,7 @@ def process_batch(downloader: Downloader, ch, method, _properties, body):
                     int(item["metadata"]["length"]),
                 )
                 warc_files_downloaded.inc()
+                bytes_downloaded.inc(len(data))
                 
                 # Process WARC records with error handling
                 try:
@@ -155,6 +180,12 @@ def process_batch(downloader: Downloader, ch, method, _properties, body):
                             try:
                                 _text = trafilatura.extract(record.content_stream().read())
                                 if _text and _text.strip():
+                                    # Apply document length filter (500-1,000,000 characters)
+                                    text_length = len(_text)
+                                    if text_length < 100 or text_length > 1_000_000:
+                                        documents_filtered_length.inc()
+                                        continue
+                                    
                                     text_extractions_successful.inc()
                                     
                                     # Process and tokenize the text
@@ -169,10 +200,17 @@ def process_batch(downloader: Downloader, ch, method, _properties, body):
                                         # Add to document batch
                                         document_batch.add_document(doc)
                                         
+                                        # Update metrics for current document batch
+                                        document_batch_size.set(len(document_batch.documents))
+                                        document_batch_size_bytes.set(document_batch.total_size)
+                                        
                                         # Check if batch should be uploaded
                                         if document_batch.should_upload():
+                                            print(f"📦 Batch threshold reached: {len(document_batch.documents)} docs, {document_batch.total_size/1024:.1f}KB, {(time.time()-document_batch.start_time)/60:.1f}min")
                                             upload_documents_to_minio(document_batch.documents)
                                             document_batch.reset()
+                                            document_batch_size.set(0)
+                                            document_batch_size_bytes.set(0)
                                             
                             except Exception as e:
                                 print(f"Text extraction failed for record: {e}")
@@ -194,6 +232,9 @@ def process_batch(downloader: Downloader, ch, method, _properties, body):
         batch_errors.inc()
         batch_failed = True
     
+    # Record batch processing time
+    batch_processing_time.set(time.time() - batch_start_time)
+    
     # Always acknowledge the message to prevent redelivery loops
     batch_counter.inc()
     ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -206,26 +247,59 @@ def process_batch(downloader: Downloader, ch, method, _properties, body):
 
 def main() -> None:
     global tokenizer, s3_client
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Common Crawl Worker')
+    parser.add_argument('--s3-endpoint', default='http://localhost:9010', 
+                       help='S3 endpoint URL (default: http://localhost:9010)')
+    parser.add_argument('--s3-access-key', default='admin',
+                       help='S3 access key (default: admin)')
+    parser.add_argument('--s3-secret-key', default='password123',
+                       help='S3 secret key (default: password123)')
+    parser.add_argument('--s3-bucket', default='processed-docs',
+                       help='S3 bucket name (default: processed-docs)')
+    parser.add_argument('--tokenizer-model', default='bert-base-uncased',
+                       help='HuggingFace tokenizer model (default: bert-base-uncased)')
+    parser.add_argument('--prometheus-port', type=int, default=9001,
+                       help='Prometheus metrics port (default: 9001)')
+    parser.add_argument('--batch-max-docs', type=int, default=10,
+                       help='Maximum documents per batch (default: 10)')
+    parser.add_argument('--batch-max-size-mb', type=int, default=1,
+                       help='Maximum batch size in MB (default: 1)')
+    parser.add_argument('--batch-max-time-minutes', type=int, default=1,
+                       help='Maximum batch time in minutes (default: 1)')
+    
+    args = parser.parse_args()
     
     # Initialize components
-    start_http_server(9002)
-    print("🚀 Starting worker with tokenization and object storage...")
+    start_http_server(args.prometheus_port)
+    print(f"🚀 Starting worker with tokenization and object storage on port {args.prometheus_port}...")
     
     # Load tokenizer
-    print("📝 Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+    print(f"📝 Loading tokenizer ({args.tokenizer_model})...")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_model)
     print("✅ Tokenizer loaded")
     
     # Setup S3 client for MinIO
-    print("🗄️ Connecting to MinIO...")
-    os.environ['AWS_ACCESS_KEY_ID'] = 'admin'
-    os.environ['AWS_SECRET_ACCESS_KEY'] = 'password123'
+    print(f"🗄️ Connecting to object store ({args.s3_endpoint})...")
+    os.environ['AWS_ACCESS_KEY_ID'] = args.s3_access_key
+    os.environ['AWS_SECRET_ACCESS_KEY'] = args.s3_secret_key
     s3_client = boto3.client(
         's3',
-        endpoint_url='http://localhost:9000',
+        endpoint_url=args.s3_endpoint,
         config=Config(signature_version='s3v4')
     )
-    print("✅ MinIO connected")
+    print("✅ Object store connected")
+    
+    # Update global document batch and bucket name with CLI args
+    global document_batch, s3_bucket_name
+    document_batch = DocumentBatch(
+        max_docs=args.batch_max_docs, 
+        max_size_mb=args.batch_max_size_mb, 
+        max_time_minutes=args.batch_max_time_minutes
+    )
+    s3_bucket_name = args.s3_bucket
     
     # Start processing
     downloader = CCDownloader(BASE_URL)
