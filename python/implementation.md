@@ -73,3 +73,14 @@
 - Added real-time batch count tracking with `batches_published_total` metric
 - Progress monitoring shows current position and completion percentage
 - Metrics exposed: `batcher_progress_percent`, `batcher_total_index_lines`, `batches_published_total`
+
+### 11. Multi-Crawl Processing with URL Deduplication ✅
+- Implemented parallel processing of multiple Common Crawl versions
+- Added URL deduplication system to prevent processing duplicate URLs across crawls
+- Created `CrawlCheckpointManager` for independent per-crawl progress tracking
+- Integrated `ClusterIndexDownloader` for automatic cluster.idx file retrieval
+- Enhanced CLI with `--crawl-versions` parameter for comma-separated crawl versions
+- Uses `ThreadPoolExecutor` for concurrent crawl processing with configurable worker limits
+- Maintains backward compatibility with legacy single-crawl mode
+- Each crawl uses dedicated RabbitMQ queues (`crawl_batches_{version}`)
+- Thread-safe checkpoint updates with proper resource cleanup

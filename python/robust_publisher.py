@@ -20,7 +20,7 @@ class RobustPublisher:
     checkpointing to ensure reliable message delivery even during outages.
     """
     
-    def __init__(self, channel_factory: Callable, checkpoint: ProcessingCheckpoint,
+    def __init__(self, channel_factory: Callable, checkpoint: Optional[ProcessingCheckpoint],
                  queue_name: str = "crawl_batches"):
         self.channel_factory = channel_factory
         self.checkpoint = checkpoint
@@ -91,8 +91,9 @@ class RobustPublisher:
             
             # Success! Update metrics and checkpoint
             messages_published.inc()
-            self.checkpoint.save_progress(line_number, batch_count)
-            checkpoint_saves.inc()
+            if self.checkpoint:
+                self.checkpoint.save_progress(line_number, batch_count)
+                checkpoint_saves.inc()
             
             print(f"✅ Published batch {batch_count} ({len(batch)} items) - line {line_number}")
             return True
