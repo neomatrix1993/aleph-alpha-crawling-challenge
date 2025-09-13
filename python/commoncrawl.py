@@ -5,7 +5,8 @@ from typing import Generator, List, Optional
 import requests
 
 
-CRAWL_PATH = "cc-index/collections/CC-MAIN-2024-30/indexes"
+def get_crawl_path(version: str = "CC-MAIN-2024-30") -> str:
+    return f"cc-index/collections/{version}/indexes"
 BASE_URL = "https://data.commoncrawl.org"
 
 

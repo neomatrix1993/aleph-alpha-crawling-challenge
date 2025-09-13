@@ -6,7 +6,7 @@ from prometheus_client import Counter, start_http_server
 
 from commoncrawl import (
     BASE_URL,
-    CRAWL_PATH,
+    get_crawl_path,
     CCDownloader,
     CSVIndexReader,
     Downloader,
@@ -28,6 +28,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batcher")
     parser.add_argument(
         "--cluster-idx-filename", type=str, help="Input file path", required=True
+    )
+    parser.add_argument(
+        "--crawl-version", type=str, default="CC-MAIN-2024-30",
+        help="Common Crawl version (default: CC-MAIN-2024-30)"
     )
     return parser.parse_args()
 
@@ -94,7 +98,8 @@ def main() -> None:
     args = parse_args()
     start_http_server(9000)
     channel = RabbitMQChannel()
-    downloader = CCDownloader(f"{BASE_URL}/{CRAWL_PATH}")
+    crawl_path = get_crawl_path(args.crawl_version)
+    downloader = CCDownloader(f"{BASE_URL}/{crawl_path}")
     index_reader = CSVIndexReader(args.cluster_idx_filename)
     process_index(index_reader, channel, downloader, BATCH_SIZE)
 

@@ -39,22 +39,27 @@
 - Organized data by date hierarchy: `processed/YYYY/MM/DD/batch_timestamp.parquet`
 - Schema includes: url, timestamp, full_text, tokens, token_count, char_count, filename
 
-## In Progress
+### 5. Object Store Configuration CLI Arguments ✅
+- Added CLI arguments for MinIO credentials and settings
+- Configurable S3 endpoint, access key, secret key, and bucket name
+- Default values for localhost development environment
 
-### 5. Object Store Configuration CLI Arguments
-- Making MinIO credentials and settings configurable via command line
-- Currently hardcoded for localhost development
+### 6. Data Volume Metrics ✅
+- Added comprehensive data volume tracking metrics
+- Track bytes downloaded, batch processing time, batch sizes
+- Monitor document batch size and upload attempts/failures
+
+### 7. Document Length Filter ✅
+- Filter documents between 500-1,000,000 characters
+- Prevents processing of too short or excessively long content
+- Improves data quality for ML training
+
+### 8. Configurable Crawl Version ✅
+- Made CC-MAIN-2024-30 crawl version configurable via CLI argument
+- Added `--crawl-version` parameter to batcher.py
+- Refactored commoncrawl.py to use dynamic path generation
 
 ## Pending Tasks
-
-### 6. Data Volume Metrics
-- Track download volume and batch/document processing counts
-
-### 7. Document Length Filter  
-- Filter documents between 500-1,000,000 characters
-
-### 8. Configurable Crawl Version
-- Make CC-MAIN-2024-30 crawl version a CLI argument
 
 ### 9. RabbitMQ Error Handling
 - Add network recovery for publishing operations
